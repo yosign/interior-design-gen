@@ -48,10 +48,23 @@ const initialGenerationState: GenerationState = {
   statusText: '',
 }
 
+const SUPPORTED_ASPECT_RATIOS = [
+  '1:1', '2:3', '3:2', '3:4', '4:3', '4:5', '5:4', '9:16', '16:9', '21:9',
+]
+
 function calcAspectRatio(width: number, height: number): string {
-  const gcd = (a: number, b: number): number => (b === 0 ? a : gcd(b, a % b))
-  const divisor = gcd(width, height)
-  return `${width / divisor}:${height / divisor}`
+  const ratio = width / height
+  let closest = SUPPORTED_ASPECT_RATIOS[0]
+  let minDiff = Infinity
+  for (const ar of SUPPORTED_ASPECT_RATIOS) {
+    const [w, h] = ar.split(':').map(Number)
+    const diff = Math.abs(w / h - ratio)
+    if (diff < minDiff) {
+      minDiff = diff
+      closest = ar
+    }
+  }
+  return closest
 }
 
 async function getImageDimensions(file: File): Promise<{ width: number; height: number }> {
