@@ -223,6 +223,9 @@ export default function Page() {
   const [isFurnitureDragging, setIsFurnitureDragging] = useState(false)
   const [isDownloading, setIsDownloading] = useState(false)
   const [userInstructions, setUserInstructions] = useState('')
+  const [refineInstructions, setRefineInstructions] = useState('')
+  const [isRefining, setIsRefining] = useState(false)
+  const [generationHistory, setGenerationHistory] = useState<string[]>([])
 
   useEffect(() => {
     const nextRoomPreview = roomImage?.previewUrl ?? null
@@ -567,6 +570,125 @@ export default function Page() {
         isLoading: false,
         statusText: '',
       })
+    }
+  }
+
+  async function handleRefine() {
+    if (!generation.imageUrl || !refineInstructions.trim()) return
+
+    setIsRefining(true)
+
+    try {
+      // fetch 当前结果图（走 proxy）
+      const proxyUrl = `/api/image-proxy?url=${encodeURIComponent(generation.imageUrl)}`
+      const res = await fetch(proxyUrl)
+      if (!res.ok) throw new Error('Failed to fetch result image')
+      const blob = await res.blob()
+      const resultFile = new File([blob], 'result-room.png', { type: blob.type || 'image/png' })
+
+      // 上传到 Dify
+      const uploadFileId = await uploadToDify(resultFile)
+
+      // 计算比例
+      const { width, height } = await getImageDimensions(resultFile)
+      const aspectRatio = calcAspectRatio(width, height)
+
+      const apiKey = process.env.NEXT_PUBLIC_INTERIOR_API_KEY
+      const endpoint = process.env.NEXT_PUBLIC_DIFY_API_ENDPOINT
+      if (!apiKey || !endpoint) throw new Error('Missing API config')
+
+      const refinePrompt = `${BUILT_IN_PROMPT}\n\nAdditional instructions: ${refineInstructions.trim()}`
+
+      // 保存当前结果到历史
+      setGenerationHistory((prev) => [generation.imageUrl!, ...prev].slice(0, 5))
+
+      setGeneration({
+        imageUrl: null,
+        error: null,
+        isLoading: true,
+        statusText: 'Refining result...',
+      })
+
+      const response = await fetch('/api/dify/generate', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': apiKey,
+          'x-api-endpoint': endpoint,
+        },
+        body: JSON.stringify({
+          query: refinePrompt,
+          response_mode: 'streaming',
+          user: `user-${Date.now()}`,
+          inputs: {
+            prompt: refinePrompt,
+            aspect_ratio: aspectRatio,
+            inputimage: [
+              {
+                type: 'image',
+                transfer_method: 'local_file',
+                upload_file_id: uploadFileId,
+              },
+              // keep existing uploaded furniture if still available
+              ...furnitureImages
+                .filter((item) => item.uploadFileId)
+                .map((item) => ({
+                  type: 'image',
+                  transfer_method: 'local_file',
+                  upload_file_id: item.uploadFileId,
+                })),
+            ],
+          },
+        }),
+      })
+
+      if (!response.ok || !response.body) {
+        const payload = await response.json().catch(() => null)
+        throw new Error(payload?.error || 'Refine request failed')
+      }
+
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      let finalImageUrl: string | null = null
+      let pendingEvent = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const chunks = buffer.split('\n\n')
+        buffer = chunks.pop() || ''
+
+        for (const chunk of chunks) {
+          const lines = chunk.split('\n').map((l) => l.trim()).filter(Boolean)
+          let dataPayload = ''
+          for (const line of lines) {
+            if (line.startsWith('event:')) pendingEvent = line.slice(6).trim()
+            if (line.startsWith('data:')) dataPayload += line.slice(5).trim()
+          }
+          if (!dataPayload || dataPayload === '[DONE]') continue
+          const parsed = JSON.parse(dataPayload) as Record<string, unknown>
+          if (typeof parsed.error === 'string' && parsed.error) throw new Error(parsed.error)
+          const eventName = (typeof parsed.event === 'string' && parsed.event) || pendingEvent
+          if (eventName === 'message_end' || eventName === 'workflow_finished') {
+            finalImageUrl = extractResultImageUrl(parsed)
+          }
+        }
+      }
+
+      if (!finalImageUrl) throw new Error('Refine completed but no image URL returned')
+
+      setGeneration({ imageUrl: finalImageUrl, error: null, isLoading: false, statusText: '' })
+      setRefineInstructions('')
+    } catch (error) {
+      setGeneration((curr) => ({
+        ...curr,
+        error: error instanceof Error ? error.message : 'Refine failed',
+        isLoading: false,
+      }))
+    } finally {
+      setIsRefining(false)
     }
   }
 
@@ -984,7 +1106,8 @@ export default function Page() {
               ) : null}
             </div>
 
-            <div className="mt-6">
+            <div className="mt-6 space-y-4">
+              {/* Result image */}
               <div className="overflow-hidden rounded-2xl border border-border bg-muted/20">
                 <div className="relative aspect-[4/5] min-h-[28rem] w-full">
                   {generation.imageUrl ? (
@@ -1003,7 +1126,7 @@ export default function Page() {
                       </div>
                       <div className="space-y-1">
                         <p className="text-base font-medium text-foreground">
-                          Generating result
+                          {generation.statusText === 'Refining result...' ? 'Refining result' : 'Generating result'}
                         </p>
                         <p className="text-sm text-muted-foreground">
                           {generation.statusText || 'Waiting for the streamed image...'}
@@ -1030,7 +1153,75 @@ export default function Page() {
               </div>
 
               {generation.error ? (
-                <p className="mt-3 text-sm text-destructive">{generation.error}</p>
+                <p className="text-sm text-destructive">{generation.error}</p>
+              ) : null}
+
+              {/* History thumbnails */}
+              {generationHistory.length > 0 ? (
+                <div className="space-y-2">
+                  <p className="text-xs font-medium text-muted-foreground">Previous versions</p>
+                  <div className="flex gap-2 overflow-x-auto pb-1">
+                    {generationHistory.map((url, idx) => (
+                      <button
+                        key={idx}
+                        type="button"
+                        title="Restore this version"
+                        onClick={() => setGeneration((curr) => ({ ...curr, imageUrl: url, error: null }))}
+                        className="relative size-16 flex-shrink-0 overflow-hidden rounded-xl border border-border bg-muted/20 transition hover:border-foreground/50 hover:opacity-80"
+                      >
+                        <Image
+                          alt={`Version ${generationHistory.length - idx}`}
+                          className="object-cover"
+                          fill
+                          sizes="64px"
+                          src={`/api/image-proxy?url=${encodeURIComponent(url)}`}
+                          unoptimized
+                        />
+                        <span className="absolute bottom-0 left-0 right-0 bg-black/50 py-0.5 text-center text-[10px] text-white">
+                          v{generationHistory.length - idx}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+
+              {/* Refine panel — shown after first successful generation */}
+              {(generation.imageUrl || generationHistory.length > 0) ? (
+                <div className="rounded-2xl border border-border bg-muted/20 p-4 space-y-3">
+                  <div className="space-y-1">
+                    <p className="text-sm font-medium text-foreground">Refine Result</p>
+                    <p className="text-xs text-muted-foreground">
+                      Describe changes to apply to the current result — move furniture, adjust colors, remove items, etc.
+                    </p>
+                  </div>
+                  <textarea
+                    className="w-full resize-none rounded-xl border border-border bg-background px-4 py-3 text-sm text-foreground placeholder:text-muted-foreground focus:border-foreground/40 focus:outline-none focus:ring-0 transition-colors"
+                    placeholder={`Examples:\n• Move the sofa closer to the window\n• Change the armchair to dark blue\n• Remove the cabinet on the right\n• Make the rug smaller`}
+                    rows={4}
+                    value={refineInstructions}
+                    onChange={(e) => setRefineInstructions(e.target.value)}
+                    disabled={isRefining || generation.isLoading}
+                  />
+                  <Button
+                    className="h-10 w-full rounded-xl text-sm"
+                    disabled={!refineInstructions.trim() || isRefining || generation.isLoading || !generation.imageUrl}
+                    onClick={handleRefine}
+                    type="button"
+                  >
+                    {isRefining ? (
+                      <>
+                        <Loader2 className="size-4 animate-spin" />
+                        Refining...
+                      </>
+                    ) : (
+                      <>
+                        <Sparkles className="size-4" />
+                        Refine Result
+                      </>
+                    )}
+                  </Button>
+                </div>
               ) : null}
             </div>
           </section>
