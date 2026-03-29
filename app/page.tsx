@@ -17,7 +17,14 @@ import { Label } from '@/components/ui/label'
 import { cn } from '@/lib/utils'
 
 const BUILT_IN_PROMPT =
-  "Please place the provided furniture items naturally into the interior room photo. Maintain the original room's lighting, perspective, and architectural details. Make the furniture fit naturally with appropriate shadows and reflections. Keep the room's overall style coherent."
+  "Please place the provided furniture items naturally into the interior room photo. Strictly preserve the original room structure — do NOT redraw or alter the walls, doors, windows, flooring, ceiling, outdoor views, or any architectural elements. Only add or adjust the furniture items. Make the furniture fit naturally with appropriate shadows and reflections matching the original lighting and perspective."
+
+const PLACEHOLDER_INSTRUCTIONS = `Optional instructions, for example:
+• Place the sofa near the window
+• Put the dining table in the center, leave a walkway
+• Change the sofa color to dark gray
+• Make the chair smaller
+• Remove the cabinet on the left`
 
 const MAX_FURNITURE_IMAGES = 4
 const MAX_FILE_SIZE = 5 * 1024 * 1024
@@ -215,6 +222,7 @@ export default function Page() {
   const [isRoomDragging, setIsRoomDragging] = useState(false)
   const [isFurnitureDragging, setIsFurnitureDragging] = useState(false)
   const [isDownloading, setIsDownloading] = useState(false)
+  const [userInstructions, setUserInstructions] = useState('')
 
   useEffect(() => {
     const nextRoomPreview = roomImage?.previewUrl ?? null
@@ -431,6 +439,10 @@ export default function Page() {
       return
     }
 
+    const finalPrompt = userInstructions.trim()
+      ? `${BUILT_IN_PROMPT}\n\nAdditional instructions: ${userInstructions.trim()}`
+      : BUILT_IN_PROMPT
+
     setGeneration({
       imageUrl: null,
       error: null,
@@ -447,11 +459,11 @@ export default function Page() {
           'x-api-endpoint': endpoint,
         },
         body: JSON.stringify({
-          query: BUILT_IN_PROMPT,
+          query: finalPrompt,
           response_mode: 'streaming',
           user: `user-${Date.now()}`,
           inputs: {
-            prompt: BUILT_IN_PROMPT,
+            prompt: finalPrompt,
             aspect_ratio: roomImage.aspectRatio ?? '1:1',
             inputimage: [
               {
@@ -910,6 +922,20 @@ export default function Page() {
                     {furnitureImages.find((item) => item.error)?.error}
                   </p>
                 ) : null}
+              </div>
+
+              <div className="space-y-2">
+                <Label className="text-sm font-medium text-foreground">
+                  Instructions{' '}
+                  <span className="font-normal text-muted-foreground">(optional)</span>
+                </Label>
+                <textarea
+                  className="w-full resize-none rounded-xl border border-border bg-muted/30 px-4 py-3 text-sm text-foreground placeholder:text-muted-foreground focus:border-foreground/40 focus:outline-none focus:ring-0 transition-colors"
+                  placeholder={PLACEHOLDER_INSTRUCTIONS}
+                  rows={4}
+                  value={userInstructions}
+                  onChange={(e) => setUserInstructions(e.target.value)}
+                />
               </div>
 
               <Button
