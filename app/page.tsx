@@ -31,6 +31,7 @@ type UploadedImage = {
   uploadFileId: string | null
   status: UploadStatus
   error: string | null
+  aspectRatio: string | null
 }
 
 type GenerationState = {
@@ -45,6 +46,28 @@ const initialGenerationState: GenerationState = {
   error: null,
   isLoading: false,
   statusText: '',
+}
+
+function calcAspectRatio(width: number, height: number): string {
+  const gcd = (a: number, b: number): number => (b === 0 ? a : gcd(b, a % b))
+  const divisor = gcd(width, height)
+  return `${width / divisor}:${height / divisor}`
+}
+
+async function getImageDimensions(file: File): Promise<{ width: number; height: number }> {
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(file)
+    const img = new window.Image()
+    img.onload = () => {
+      resolve({ width: img.naturalWidth, height: img.naturalHeight })
+      URL.revokeObjectURL(url)
+    }
+    img.onerror = () => {
+      resolve({ width: 1, height: 1 })
+      URL.revokeObjectURL(url)
+    }
+    img.src = url
+  })
 }
 
 function createLocalId() {
@@ -228,10 +251,14 @@ export default function Page() {
       uploadFileId: null,
       status: 'uploading',
       error: null,
+      aspectRatio: null,
     })
 
     try {
-      const compressedFile = await compressImageIfNeeded(file)
+      const [compressedFile, dimensions] = await Promise.all([
+        compressImageIfNeeded(file),
+        getImageDimensions(file),
+      ])
       if (compressedFile !== file) {
         URL.revokeObjectURL(nextPreviewUrl)
       }
@@ -239,6 +266,7 @@ export default function Page() {
       const previewUrl =
         compressedFile === file ? nextPreviewUrl : URL.createObjectURL(compressedFile)
       const uploadFileId = await uploadToDify(compressedFile)
+      const aspectRatio = calcAspectRatio(dimensions.width, dimensions.height)
 
       setRoomImage({
         id: createLocalId(),
@@ -247,6 +275,7 @@ export default function Page() {
         uploadFileId,
         status: 'uploaded',
         error: null,
+        aspectRatio,
       })
     } catch (error) {
       setRoomImage((current) =>
@@ -280,6 +309,7 @@ export default function Page() {
       uploadFileId: null,
       status: 'uploading' as const,
       error: null,
+      aspectRatio: null,
     }))
 
     setFurnitureImages((current) => [...current, ...placeholders])
@@ -409,6 +439,7 @@ export default function Page() {
           user: `user-${Date.now()}`,
           inputs: {
             prompt: BUILT_IN_PROMPT,
+            aspect_ratio: roomImage.aspectRatio ?? '1:1',
             inputimage: [
               {
                 type: 'image',
