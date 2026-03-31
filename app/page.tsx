@@ -187,67 +187,6 @@ async function uploadToDify(file: File) {
   return uploadFileId
 }
 
-function extractResultImageUrl(payload: Record<string, unknown>): string | null {
-  // 递归提取所有字符串值中的第一个 http URL
-  function findUrl(obj: unknown, depth = 0): string | null {
-    if (depth > 5) return null
-    if (typeof obj === 'string') {
-      const trimmed = obj.trim()
-      // 直接是 URL
-      if (trimmed.startsWith('http') && (trimmed.includes('.jpg') || trimmed.includes('.png') || trimmed.includes('.webp') || trimmed.includes('.jpeg') || trimmed.includes('image') || trimmed.includes('upload'))) {
-        return trimmed
-      }
-      // markdown 格式 ![...](url)
-      const mdMatch = trimmed.match(/!\[.*?\]\((https?:\/\/[^\s)]+)\)/)
-      if (mdMatch) return mdMatch[1]
-      // 纯 URL（不带图片扩展名但是 http 开头）
-      if (trimmed.startsWith('http') && trimmed.length > 10) {
-        return trimmed
-      }
-      return null
-    }
-    if (Array.isArray(obj)) {
-      for (const item of obj) {
-        const found = findUrl(item, depth + 1)
-        if (found) return found
-      }
-    }
-    if (obj && typeof obj === 'object') {
-      // 优先检查常见字段名
-      const priorityKeys = ['image_url', 'url', 'image', 'result', 'output', 'img_url', 'src', 'link', 'value', 'text', 'content']
-      const record = obj as Record<string, unknown>
-      for (const key of priorityKeys) {
-        if (key in record) {
-          const found = findUrl(record[key], depth + 1)
-          if (found) return found
-        }
-      }
-      // 再遍历所有字段
-      for (const val of Object.values(record)) {
-        const found = findUrl(val, depth + 1)
-        if (found) return found
-      }
-    }
-    return null
-  }
-
-  // 1. 先检查 outputs（最可能的位置）
-  const outputs = (payload.outputs as Record<string, unknown> | undefined)
-    || ((payload.metadata as Record<string, unknown> | undefined)?.outputs as Record<string, unknown> | undefined)
-  if (outputs) {
-    const fromOutputs = findUrl(outputs)
-    if (fromOutputs) return fromOutputs
-  }
-
-  // 2. 检查 answer 字段（可能是 markdown 或纯 URL）
-  if (payload.answer) {
-    const fromAnswer = findUrl(payload.answer)
-    if (fromAnswer) return fromAnswer
-  }
-
-  // 3. 兜底：递归搜索整个 payload
-  return findUrl(payload)
-}
 
 export default function Page() {
   const roomInputRef = useRef<HTMLInputElement>(null)
@@ -509,14 +448,14 @@ export default function Page() {
             aspect_ratio: roomImage.aspectRatio ?? '1:1',
             inputimage: [
               {
-                type: 'image',
                 transfer_method: 'local_file',
                 upload_file_id: roomImage.uploadFileId,
+                type: 'image',
               },
               ...uploadedFurniture.map((item) => ({
-                type: 'image',
                 transfer_method: 'local_file',
                 upload_file_id: item.uploadFileId,
+                type: 'image',
               })),
             ],
           },
@@ -532,8 +471,6 @@ export default function Page() {
       const decoder = new TextDecoder()
       let buffer = ''
       let finalImageUrl: string | null = null
-      let pendingEvent = ''
-      let collectedDebugData: Record<string, unknown>[] = []
 
       while (true) {
         const { done, value } = await reader.read()
@@ -558,10 +495,6 @@ export default function Page() {
           let dataPayload = ''
 
           for (const line of lines) {
-            if (line.startsWith('event:')) {
-              pendingEvent = line.slice(6).trim()
-            }
-
             if (line.startsWith('data:')) {
               dataPayload += line.slice(5).trim()
             }
@@ -572,32 +505,24 @@ export default function Page() {
           }
 
           const parsed = JSON.parse(dataPayload) as Record<string, unknown>
-          collectedDebugData.push(parsed)
 
           if (typeof parsed.error === 'string' && parsed.error) {
             throw new Error(parsed.error)
           }
 
-          const eventName =
-            (typeof parsed.event === 'string' && parsed.event) || pendingEvent
-
-          // 每个事件都尝试提取 URL（不仅限于 message_end）
-          const attemptedUrl = extractResultImageUrl(parsed)
-          if (attemptedUrl) {
-            finalImageUrl = attemptedUrl
+          // Backend has already extracted the imageUrl
+          if (parsed.imageUrl && typeof parsed.imageUrl === 'string') {
+            finalImageUrl = parsed.imageUrl
           }
 
-          if (eventName === 'message' || eventName === 'agent_message') {
-            setGeneration((current) => ({
-              ...current,
-              statusText: 'Refining placement and lighting...',
-            }))
+          // Progress updates from backend
+          if (parsed.statusText && typeof parsed.statusText === 'string') {
+            setGeneration((current) => ({ ...current, statusText: parsed.statusText as string }))
           }
         }
       }
 
       if (!finalImageUrl) {
-        console.error('[Generate] No image URL found. Full SSE data collected:', JSON.stringify(collectedDebugData, null, 2))
         throw new Error('Generation completed but no image URL was returned. Check browser console for raw API response.')
       }
 
@@ -669,17 +594,17 @@ export default function Page() {
             aspect_ratio: aspectRatio,
             inputimage: [
               {
-                type: 'image',
                 transfer_method: 'local_file',
                 upload_file_id: uploadFileId,
+                type: 'image',
               },
               // keep existing uploaded furniture if still available
               ...furnitureImages
                 .filter((item) => item.uploadFileId)
                 .map((item) => ({
-                  type: 'image',
                   transfer_method: 'local_file',
                   upload_file_id: item.uploadFileId,
+                  type: 'image',
                 })),
             ],
           },
@@ -695,7 +620,6 @@ export default function Page() {
       const decoder = new TextDecoder()
       let buffer = ''
       let finalImageUrl: string | null = null
-      let pendingEvent = ''
 
       while (true) {
         const { done, value } = await reader.read()
@@ -708,15 +632,13 @@ export default function Page() {
           const lines = chunk.split('\n').map((l) => l.trim()).filter(Boolean)
           let dataPayload = ''
           for (const line of lines) {
-            if (line.startsWith('event:')) pendingEvent = line.slice(6).trim()
             if (line.startsWith('data:')) dataPayload += line.slice(5).trim()
           }
           if (!dataPayload || dataPayload === '[DONE]') continue
           const parsed = JSON.parse(dataPayload) as Record<string, unknown>
           if (typeof parsed.error === 'string' && parsed.error) throw new Error(parsed.error)
-          const eventName = (typeof parsed.event === 'string' && parsed.event) || pendingEvent
-          if (eventName === 'message_end' || eventName === 'workflow_finished') {
-            finalImageUrl = extractResultImageUrl(parsed)
+          if (parsed.imageUrl && typeof parsed.imageUrl === 'string') {
+            finalImageUrl = parsed.imageUrl
           }
         }
       }
