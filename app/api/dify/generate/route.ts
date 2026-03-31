@@ -16,8 +16,8 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // Always use workflows/run (ignore any endpoint header from client)
-  const WORKFLOW_ENDPOINT = 'https://api.dify.ai/v1/workflows/run';
+  // Chatflow endpoint
+  const WORKFLOW_ENDPOINT = request.headers.get('x-api-endpoint') || 'https://api.dify.ai/v1/chat-messages';
 
   const encoder = new TextEncoder();
   let heartbeatInterval: NodeJS.Timeout | null = null;
@@ -37,13 +37,19 @@ export async function POST(request: NextRequest) {
           },
           body: JSON.stringify({
             inputs: body.inputs,
+            query: body.query || '',
             response_mode: 'streaming',
+            conversation_id: '',
             user: body.user || `user-${Date.now()}`,
+            files: body.files || [],
           }),
         });
 
+        console.log('[Generate] Dify response status:', difyResponse.status);
+
         if (!difyResponse.ok) {
           const errorText = await difyResponse.text();
+          console.error('[Generate] Dify error body:', errorText.substring(0, 500));
           let errorData: unknown;
           try { errorData = JSON.parse(errorText); } catch { errorData = errorText; }
           controller.enqueue(encoder.encode(
@@ -85,30 +91,27 @@ export async function POST(request: NextRequest) {
                 const parsed = JSON.parse(data) as Record<string, unknown>;
                 collectedEvents.push(parsed);
 
-                // workflow_finished contains final outputs
-                if (parsed.event === 'workflow_finished') {
-                  const workflowData = parsed.data as Record<string, unknown> | undefined;
-                  const outputs = workflowData?.outputs as Record<string, unknown> | undefined;
-                  if (outputs) {
-                    finalImageUrl = findImageUrl(outputs);
-                  }
-                  if (!finalImageUrl) {
-                    finalImageUrl = findImageUrl(parsed);
-                  }
+                // chatflow: message_end contains outputs / metadata
+                if (parsed.event === 'message_end' || parsed.event === 'workflow_finished') {
+                  const outputs = (parsed.outputs as Record<string, unknown> | undefined)
+                    || ((parsed.metadata as Record<string, unknown> | undefined)?.outputs as Record<string, unknown> | undefined);
+                  if (outputs) finalImageUrl = findImageUrl(outputs);
+                  if (!finalImageUrl) finalImageUrl = findImageUrl(parsed);
+                  console.log('[Generate] message_end outputs:', JSON.stringify(outputs)?.substring(0, 300));
                 }
 
-                // node_finished may also contain image
+                // answer chunks may contain image URL
+                if ((parsed.event === 'message' || parsed.event === 'agent_message') && parsed.answer) {
+                  const url = findImageUrl(parsed.answer);
+                  if (url) finalImageUrl = url;
+                  controller.enqueue(encoder.encode(
+                    `data: ${JSON.stringify({ event: 'progress', statusText: 'Generating...' })}\n\n`
+                  ));
+                }
+
+                // node_finished fallback
                 if (parsed.event === 'node_finished' && !finalImageUrl) {
                   finalImageUrl = findImageUrl(parsed);
-                }
-
-                // progress update for frontend
-                if (parsed.event === 'node_started') {
-                  const nodeData = parsed.data as Record<string, unknown> | undefined;
-                  const nodeTitle = nodeData?.title || 'Processing';
-                  controller.enqueue(encoder.encode(
-                    `data: ${JSON.stringify({ event: 'progress', statusText: `Running: ${nodeTitle}` })}\n\n`
-                  ));
                 }
 
               } catch {}
