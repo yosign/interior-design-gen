@@ -1075,7 +1075,14 @@ export default function Page() {
             <div className="mt-6 space-y-4">
               {/* Result image */}
               <div className="overflow-hidden rounded-2xl border border-border bg-muted/20">
-                <div className="relative aspect-[4/5] min-h-[28rem] w-full">
+                <div
+                  className="relative w-full"
+                  style={{
+                    aspectRatio: roomImage?.aspectRatio
+                      ? roomImage.aspectRatio.replace(':', '/')
+                      : '4/5',
+                  }}
+                >
                   {generation.imageUrl ? (
                     <Image
                       alt="Generated interior design result"
