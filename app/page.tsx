@@ -17,7 +17,7 @@ import { Label } from '@/components/ui/label'
 import { cn } from '@/lib/utils'
 
 const BUILT_IN_PROMPT =
-  "Please place the provided furniture items naturally into the interior room photo. Strictly preserve the original room structure — do NOT redraw or alter the walls, doors, windows, flooring, ceiling, outdoor views, or any architectural elements. Only add or adjust the furniture items. Make the furniture fit naturally with appropriate shadows and reflections matching the original lighting and perspective."
+  "Please place the provided furniture items naturally into the interior room photo. Strictly preserve the original room structure — do NOT redraw or alter the walls, doors, windows, flooring, ceiling, outdoor views, or any architectural elements. Only add or adjust the furniture items. Preserve the original proportions and shape of each furniture item exactly as shown — do not stretch, distort, or resize the furniture beyond what is needed for natural perspective. Make the furniture fit naturally with appropriate shadows and reflections matching the original lighting and perspective. The furniture should look like it physically belongs in the room."
 
 const PLACEHOLDER_INSTRUCTIONS = `Optional instructions, for example:
 • Place the sofa near the window
@@ -187,27 +187,66 @@ async function uploadToDify(file: File) {
   return uploadFileId
 }
 
-function extractResultImageUrl(payload: Record<string, unknown>) {
-  const outputs =
-    (payload.outputs as Record<string, unknown> | undefined) ||
-    ((payload.metadata as Record<string, unknown> | undefined)?.outputs as
-      | Record<string, unknown>
-      | undefined)
-
-  const candidates = [
-    outputs?.image_url,
-    outputs?.image,
-    outputs?.url,
-    payload.answer,
-  ]
-
-  for (const candidate of candidates) {
-    if (typeof candidate === 'string' && candidate.trim()) {
-      return candidate.trim()
+function extractResultImageUrl(payload: Record<string, unknown>): string | null {
+  // 递归提取所有字符串值中的第一个 http URL
+  function findUrl(obj: unknown, depth = 0): string | null {
+    if (depth > 5) return null
+    if (typeof obj === 'string') {
+      const trimmed = obj.trim()
+      // 直接是 URL
+      if (trimmed.startsWith('http') && (trimmed.includes('.jpg') || trimmed.includes('.png') || trimmed.includes('.webp') || trimmed.includes('.jpeg') || trimmed.includes('image') || trimmed.includes('upload'))) {
+        return trimmed
+      }
+      // markdown 格式 ![...](url)
+      const mdMatch = trimmed.match(/!\[.*?\]\((https?:\/\/[^\s)]+)\)/)
+      if (mdMatch) return mdMatch[1]
+      // 纯 URL（不带图片扩展名但是 http 开头）
+      if (trimmed.startsWith('http') && trimmed.length > 10) {
+        return trimmed
+      }
+      return null
     }
+    if (Array.isArray(obj)) {
+      for (const item of obj) {
+        const found = findUrl(item, depth + 1)
+        if (found) return found
+      }
+    }
+    if (obj && typeof obj === 'object') {
+      // 优先检查常见字段名
+      const priorityKeys = ['image_url', 'url', 'image', 'result', 'output', 'img_url', 'src', 'link', 'value', 'text', 'content']
+      const record = obj as Record<string, unknown>
+      for (const key of priorityKeys) {
+        if (key in record) {
+          const found = findUrl(record[key], depth + 1)
+          if (found) return found
+        }
+      }
+      // 再遍历所有字段
+      for (const val of Object.values(record)) {
+        const found = findUrl(val, depth + 1)
+        if (found) return found
+      }
+    }
+    return null
   }
 
-  return null
+  // 1. 先检查 outputs（最可能的位置）
+  const outputs = (payload.outputs as Record<string, unknown> | undefined)
+    || ((payload.metadata as Record<string, unknown> | undefined)?.outputs as Record<string, unknown> | undefined)
+  if (outputs) {
+    const fromOutputs = findUrl(outputs)
+    if (fromOutputs) return fromOutputs
+  }
+
+  // 2. 检查 answer 字段（可能是 markdown 或纯 URL）
+  if (payload.answer) {
+    const fromAnswer = findUrl(payload.answer)
+    if (fromAnswer) return fromAnswer
+  }
+
+  // 3. 兜底：递归搜索整个 payload
+  return findUrl(payload)
 }
 
 export default function Page() {
@@ -494,6 +533,7 @@ export default function Page() {
       let buffer = ''
       let finalImageUrl: string | null = null
       let pendingEvent = ''
+      let collectedDebugData: Record<string, unknown>[] = []
 
       while (true) {
         const { done, value } = await reader.read()
@@ -532,6 +572,7 @@ export default function Page() {
           }
 
           const parsed = JSON.parse(dataPayload) as Record<string, unknown>
+          collectedDebugData.push(parsed)
 
           if (typeof parsed.error === 'string' && parsed.error) {
             throw new Error(parsed.error)
@@ -540,21 +581,24 @@ export default function Page() {
           const eventName =
             (typeof parsed.event === 'string' && parsed.event) || pendingEvent
 
+          // 每个事件都尝试提取 URL（不仅限于 message_end）
+          const attemptedUrl = extractResultImageUrl(parsed)
+          if (attemptedUrl) {
+            finalImageUrl = attemptedUrl
+          }
+
           if (eventName === 'message' || eventName === 'agent_message') {
             setGeneration((current) => ({
               ...current,
               statusText: 'Refining placement and lighting...',
             }))
           }
-
-          if (eventName === 'message_end' || eventName === 'workflow_finished') {
-            finalImageUrl = extractResultImageUrl(parsed)
-          }
         }
       }
 
       if (!finalImageUrl) {
-        throw new Error('Generation completed but no image URL was returned')
+        console.error('[Generate] No image URL found. Full SSE data collected:', JSON.stringify(collectedDebugData, null, 2))
+        throw new Error('Generation completed but no image URL was returned. Check browser console for raw API response.')
       }
 
       setGeneration({
